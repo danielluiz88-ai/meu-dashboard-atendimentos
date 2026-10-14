@@ -1,15 +1,18 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 
 st.set_page_config(page_title="Dashboard Interativo Completo", layout="wide")
 
-st.title("📊 Dashboard de Atendimentos - Versão 4.1 (Tags Unificadas)")
+st.title("📊 Dashboard de Atendimentos - Versão 6.0 (Auditoria de Jornada)")
 
+# --- FUNÇÕES AUXILIARES ---
 def calcular_tempo_medio(serie_tempo):
     try:
         td = pd.to_timedelta(serie_tempo)
         media = td.mean()
+        if pd.isna(media): return "00h 00m 00s"
         total_segundos = int(media.total_seconds())
         horas, resto = divmod(total_segundos, 3600)
         minutos, segundos = divmod(resto, 60)
@@ -17,9 +20,16 @@ def calcular_tempo_medio(serie_tempo):
     except:
         return "N/A"
 
-st.sidebar.title("Configurações")
-st.sidebar.markdown("Faça o upload do seu ficheiro aqui:")
+def formatar_timedelta_horas(td):
+    if pd.isna(td): return "00h 00m"
+    total_segundos = int(td.total_seconds())
+    horas, resto = divmod(total_segundos, 3600)
+    minutos, _ = divmod(resto, 60)
+    return f"{horas:02d}h {minutos:02d}m"
 
+# --- MENU LATERAL ---
+st.sidebar.title("Configurações")
+st.sidebar.markdown("Faça o upload do ficheiro aqui:")
 ficheiro_carregado = st.sidebar.file_uploader("", type=['csv'])
 
 if ficheiro_carregado is not None:
@@ -27,30 +37,48 @@ if ficheiro_carregado is not None:
         # Lendo os dados
         df = pd.read_csv(ficheiro_carregado, sep=';', encoding='utf-8-sig', on_bad_lines='skip')
         
-        # --- LIMPEZA E UNIFICAÇÃO DE TAGS ---
-        # 1. Transforma em texto
-        # 2. Converte tudo para maiúsculas (upper)
-        # 3. Remove espaços no início e no fim (strip)
-        # 4. Remove aspas duplas que vieram do sistema (replace)
+        # --- LIMPEZA DE DADOS ---
         if 'Tag' in df.columns:
             df['Tag'] = df['Tag'].astype(str).str.upper().str.strip().str.replace('"', '')
-            # O Python transforma células vazias na palavra "NAN", vamos removê-la para não sujar o gráfico
             df['Tag'] = df['Tag'].replace('NAN', pd.NA)
+            
+        # Preparando colunas de tempo
+        df['Data de Entrada'] = pd.to_datetime(df['Data de Entrada'], dayfirst=True, errors='coerce')
+        # Tenta pegar a data de finalização, se for '-', usa a data de entrada como fallback
+        df['Data de finalização'] = pd.to_datetime(df['Data de finalização'].replace('-', np.nan), dayfirst=True, errors='coerce')
+        df['Data de finalização'] = df['Data de finalização'].fillna(df['Data de Entrada'])
+        df['Tempo em Fila (Segundos)'] = pd.to_timedelta(df['Tempo em Fila']).dt.total_seconds()
+        
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Filtros Globais")
+        
+        # Filtro de Data
+        data_min = df['Data de Entrada'].min().date()
+        data_max = df['Data de Entrada'].max().date()
+        
+        datas_selecionadas = st.sidebar.date_input(
+            "Selecione o Período:", value=(data_min, data_max),
+            min_value=data_min, max_value=data_max, format="DD/MM/YYYY"
+        )
+        
+        if len(datas_selecionadas) == 2:
+            data_inicio, data_fim = datas_selecionadas
+            df_filtrado_data = df[(df['Data de Entrada'].dt.date >= data_inicio) & (df['Data de Entrada'].dt.date <= data_fim)]
+        else:
+            df_filtrado_data = df
         
         # Filtro de Status
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Filtro Geral")
-        lista_status = df['Status'].dropna().unique().tolist()
+        lista_status = df_filtrado_data['Status'].dropna().unique().tolist()
         status_selecionado = st.sidebar.multiselect("Selecione o Status:", options=lista_status, default=lista_status)
         
-        df_base = df[df['Status'].isin(status_selecionado)]
+        df_base = df_filtrado_data[df_filtrado_data['Status'].isin(status_selecionado)]
         
-        st.markdown("### 1. Desempenho por Agente")
-        st.info("💡 **Dica:** Clique na barra de um Agente para ver as suas Tags, Classificações e Tempos Médios logo abaixo!")
+        # --- VISÃO GERAL ---
+        st.markdown("### 1. Visão Geral da Equipa")
+        st.info("💡 Clique numa barra para filtrar as caixas indicadoras em baixo por agente!")
         
         agentes = df_base['Agente'].value_counts().head(10).reset_index()
         agentes.columns = ['Agente', 'Quantidade']
-        
         fig_agentes = px.bar(agentes, x='Quantidade', y='Agente', orientation='h', color='Quantidade')
         
         eventos = st.plotly_chart(fig_agentes, use_container_width=True, on_select="rerun")
@@ -62,59 +90,69 @@ if ficheiro_carregado is not None:
                 
         if len(agentes_clicados) > 0:
             df_final = df_base[df_base['Agente'].isin(agentes_clicados)]
-            st.success(f"A mostrar resultados detalhados para: {', '.join(agentes_clicados)}")
         else:
             df_final = df_base
-        
-        st.divider()
-        
-        st.markdown("### 2. Indicadores Chave")
+            
         col1, col2, col3, col4 = st.columns(4)
-        
         col1.metric("Total de Atendimentos", df_final.shape[0])
         col2.metric("Quantidade de Agentes", df_final['Agente'].nunique())
         col3.metric("Quantidade de Serviços", df_final['Serviço'].nunique())
-        
-        tempo_medio = calcular_tempo_medio(df_final['Tempo de Atendimento'])
-        col4.metric("⏱️ Tempo Médio de Atend.", tempo_medio)
+        col4.metric("⏱️ Tempo Médio de Atend.", calcular_tempo_medio(df_final['Tempo de Atendimento']))
         
         st.divider()
         
-        st.markdown("### 3. Análise Detalhada de Atendimentos")
+        # --- AUDITORIA DE JORNADA ---
+        st.markdown("### 🕵️ 2. Auditoria de Jornada Individual")
+        st.write("Analise o tempo de sistema de cada agente dia a dia, para verificar se estão a cumprir a carga horária e como está o tempo de espera dos seus clientes.")
         
-        colA, colB = st.columns(2)
+        # Dropdown para escolher um agente específico
+        lista_todos_agentes = sorted(df_base['Agente'].dropna().unique().tolist())
+        agente_auditoria = st.selectbox("Selecione um Agente para a Auditoria:", options=lista_todos_agentes)
         
-        with colA:
-            classificacoes = df_final['Classificação'].value_counts().head(10).reset_index()
-            classificacoes.columns = ['Classificação', 'Quantidade']
-            fig_class = px.bar(classificacoes, x='Quantidade', y='Classificação', orientation='h', 
-                               title="Top 10 Classificações", color='Quantidade', color_continuous_scale='teal')
-            st.plotly_chart(fig_class, use_container_width=True)
+        if agente_auditoria:
+            # Filtra os dados apenas para o agente selecionado
+            df_auditoria = df_base[df_base['Agente'] == agente_auditoria].copy()
+            df_auditoria['Dia'] = df_auditoria['Data de Entrada'].dt.date
             
-        with colB:
-            servicos = df_final['Serviço'].value_counts().head(10).reset_index()
-            servicos.columns = ['Serviço', 'Quantidade']
-            fig_servicos = px.bar(servicos, x='Quantidade', y='Serviço', orientation='h', 
-                                  title="Top 10 Serviços", color='Quantidade', color_continuous_scale='blues')
-            st.plotly_chart(fig_servicos, use_container_width=True)
+            # Agrupa por dia para descobrir o primeiro e último horário do agente
+            jornada = df_auditoria.groupby('Dia').agg(
+                Primeiro_Atendimento=('Data de Entrada', 'min'),
+                Ultimo_Atendimento=('Data de finalização', 'max'),
+                Total_Atendimentos=('Data de Entrada', 'count'),
+                Media_Espera=('Tempo em Fila (Segundos)', 'mean')
+            ).reset_index()
             
-        colC, colD = st.columns(2)
-        
-        with colC:
-            tags = df_final['Tag'].dropna().value_counts().head(10).reset_index()
-            tags.columns = ['Tag', 'Quantidade']
-            fig_tags = px.pie(tags, values='Quantidade', names='Tag', title="Distribuição das Top 10 Tags (Unificadas)")
-            st.plotly_chart(fig_tags, use_container_width=True)
+            # Cálculos de tempo
+            jornada['Tempo_Logado'] = jornada['Ultimo_Atendimento'] - jornada['Primeiro_Atendimento']
             
-        with colD:
-            status_grafico = df_final['Status'].value_counts().reset_index()
-            status_grafico.columns = ['Status', 'Quantidade']
-            fig_status = px.pie(status_grafico, values='Quantidade', names='Status', title="Proporção de Status")
-            st.plotly_chart(fig_status, use_container_width=True)
+            # Verifica se cumpriu 6 horas (21600 segundos)
+            jornada['Meta 6h'] = jornada['Tempo_Logado'].dt.total_seconds() >= 21600
+            jornada['Meta 6h'] = jornada['Meta 6h'].map({True: '✅ Cumpriu', False: '❌ Menos de 6h'})
+            
+            # Formatação amigável para exibição
+            jornada['Dia'] = pd.to_datetime(jornada['Dia']).dt.strftime('%d/%m/%Y')
+            jornada['Primeiro_Atendimento'] = jornada['Primeiro_Atendimento'].dt.strftime('%H:%M:%S')
+            jornada['Ultimo_Atendimento'] = jornada['Ultimo_Atendimento'].dt.strftime('%H:%M:%S')
+            jornada['Tempo_Logado'] = jornada['Tempo_Logado'].apply(formatar_timedelta_horas)
+            
+            # Convertendo os segundos de espera para formato de tempo
+            jornada['Media_Espera'] = pd.to_timedelta(jornada['Media_Espera'], unit='s').apply(
+                lambda x: f"{int(x.total_seconds() // 60):02d}m {int(x.total_seconds() % 60):02d}s" if not pd.isna(x) else "00m 00s"
+            )
+            
+            # Renomeando colunas para a tabela
+            jornada = jornada.rename(columns={
+                'Primeiro_Atendimento': 'Início do Turno',
+                'Ultimo_Atendimento': 'Última Ação',
+                'Total_Atendimentos': 'Qtd. Atendimentos',
+                'Tempo_Logado': 'Tempo Logado (Calculado)',
+                'Media_Espera': 'Tempo Médio em Fila (Espera)'
+            })
+            
+            # Exibe a tabela bonitinha
+            st.dataframe(jornada, use_container_width=True, hide_index=True)
             
     except Exception as e:
         st.error(f"Erro ao ler o ficheiro. Detalhe: {e}")
 else:
     st.info("👈 Por favor, carregue o ficheiro CSV no menu ao lado para iniciar.")
-    df['Tag'] = df['Tag'].astype(str).str.upper().str.strip().str.replace('"', '')
-df['Tag'] = df['Tag'].replace('NAN', pd.NA)
