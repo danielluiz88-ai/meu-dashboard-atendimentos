@@ -168,7 +168,7 @@ with aba_graficos:
         st.divider()
         
         # --- MAPA DE CALOR (HORÁRIOS DE PICO COM NÚMEROS) ---
-        st.markdown("### 🔥 Mapa de Calor - Horários de Pico da Equipa")
+        st.markdown("### 🔥 Mapa de Calor - Horários de Pico da Equipe")
         
         # Se o usuário clicou numa cidade, filtra os horários para ela!
         if locais_clicados:
